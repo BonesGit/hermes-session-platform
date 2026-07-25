@@ -77,8 +77,9 @@ from gateway.platforms.base import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Plugin paths
+# Plugin identity / paths
 # ---------------------------------------------------------------------------
+PLUGIN_VERSION = "0.1.1"
 _PLUGIN_ROOT = Path(__file__).resolve().parent
 _DEFAULT_BRIDGE_DIR = _PLUGIN_ROOT / "bridge"
 _DEFAULT_BRIDGE_SCRIPT = _DEFAULT_BRIDGE_DIR / "session-bridge.mjs"
@@ -92,6 +93,17 @@ def resolve_bridge_script() -> Path:
 def resolve_bridge_dir() -> Path:
     """Return the bridge directory (package.json + node_modules live here)."""
     return _DEFAULT_BRIDGE_DIR
+
+
+def bridge_port_is_listening(port: int, host: str = "127.0.0.1", timeout: float = 0.35) -> bool:
+    """Return True if something already accepts TCP connections on host:port."""
+    import socket
+
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +309,11 @@ class SessionAdapter(BasePlatformAdapter):
         self._bot_session_id: Optional[str] = None
 
         logger.info(
-            "Session adapter initialized: port=%d bot=%s",
+            "Session plugin v%s initialized: port=%d bot=%s bridge=%s",
+            PLUGIN_VERSION,
             self.bridge_port,
             self.bot_name,
+            resolve_bridge_script(),
         )
 
     # ------------------------------------------------------------------
@@ -308,11 +322,11 @@ class SessionAdapter(BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Spawn the bridge, wait for it to be ready, then start SSE listener."""
-        
+
         # Prevent multiple gateways from using the same Session account.
         # We use SESSION_BOT_ID (the public Session ID) as the lock identity
         # because the mnemonic might not be present in all configurations.
-        bot_id = (self.config.extra.get("bot_id") or 
+        bot_id = (self.config.extra.get("bot_id") or
                  os.getenv("SESSION_BOT_ID") or "unknown")
         if not self._acquire_platform_lock(
             scope="session-bot-id",
@@ -320,6 +334,28 @@ class SessionAdapter(BasePlatformAdapter):
             resource_desc="Session account (bot ID)"
         ):
             return False
+
+        # Fail fast if the bridge port is already taken (another gateway,
+        # leftover node process, or unrelated service). Allow a short window
+        # for a just-killed bridge to release the port after disconnect.
+        if bridge_port_is_listening(self.bridge_port):
+            freed = False
+            for _ in range(10):
+                await asyncio.sleep(0.2)
+                if not bridge_port_is_listening(self.bridge_port):
+                    freed = True
+                    break
+            if not freed:
+                msg = (
+                    f"Session: port {self.bridge_port} already in use on 127.0.0.1. "
+                    f"Stop the other process or set SESSION_BRIDGE_PORT to a free port. "
+                    f"(plugin v{PLUGIN_VERSION})"
+                )
+                logger.error(msg)
+                self._set_fatal_error(
+                    "session_bridge_port_in_use", msg, retryable=True
+                )
+                return False
 
         # 1. Spawn the bridge process
         try:
@@ -1179,7 +1215,8 @@ class SessionAdapter(BasePlatformAdapter):
         }
 
         logger.info(
-            "Session: spawning bridge: node %s (port %d, log %s)",
+            "Session plugin v%s: spawning bridge node %s (port %d, log %s)",
+            PLUGIN_VERSION,
             bridge_script,
             self.bridge_port,
             self._bridge_log,

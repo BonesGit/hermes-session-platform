@@ -40,6 +40,16 @@ class TestBridgePaths:
         assert (d / "package.json").is_file()
 
 
+class TestPortHelper:
+    def test_unused_high_port_not_listening(self):
+        # Ephemeral-ish high port; extremely unlikely to be bound.
+        assert session_adapter.bridge_port_is_listening(61999) is False
+
+    def test_plugin_version_set(self):
+        assert session_adapter.PLUGIN_VERSION
+        assert session_adapter.PLUGIN_VERSION[0].isdigit()
+
+
 class TestGroupAllowlists:
     def test_empty_allowlists_allow(self):
         assert session_adapter.is_group_message_allowed("03aaa", "05bbb", [], [])

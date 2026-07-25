@@ -1,14 +1,25 @@
 # hermes-session-platform
 
-Standalone **Session** (getsession.org) gateway adapter for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Hermes plugin](https://img.shields.io/badge/Hermes-platform%20plugin-blue)](https://github.com/NousResearch/hermes-agent)
+[![GitHub](https://img.shields.io/badge/GitHub-BonesGit%2Fhermes--session--platform-181717?logo=github)](https://github.com/BonesGit/hermes-session-platform)
 
-This is a **community / third-party plugin**, not an in-tree Hermes platform. It was extracted from the approach in [PR #6948](https://github.com/NousResearch/hermes-agent/pull/6948) after maintainers directed Session integrations to the platform-plugin registry (`ctx.register_platform`) instead of core tree changes.
+Standalone **Session** ([getsession.org](https://getsession.org)) messaging gateway for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-> **Network risk:** Session Foundation funding/status has been uncertain. Use at your own risk; this plugin is optional and does not ship with Hermes.
+> **Not in-tree Hermes.** Session was declined as a core platform ([PR #6948](https://github.com/NousResearch/hermes-agent/pull/6948)) under the third-party product policy. This repo is the supported shape: a user plugin via `ctx.register_platform` / `gateway.platform_registry`.
+
+**One-liner install:**
+```bash
+git clone https://github.com/BonesGit/hermes-session-platform.git ~/.hermes/plugins/session-platform \
+  && cd ~/.hermes/plugins/session-platform && npm install \
+  && hermes plugins enable session-platform && hermes gateway setup && hermes gateway restart
+```
+
+> **Network risk:** Session network / foundation status has been uncertain. Optional plugin; use at your own risk.
 
 ## Prerequisites
 
-- Hermes Agent with the platform plugin registry (post platform-plugin migration)
+- Hermes Agent with the platform plugin registry (current `main`)
 - Node.js **≥ 24.12.0** and npm
 - A Session account (created by setup, or restored from a 13-word mnemonic)
 
@@ -17,11 +28,10 @@ This is a **community / third-party plugin**, not an in-tree Hermes platform. It
 ### Option A — user plugin directory (recommended)
 
 ```bash
-git clone <this-repo-url> ~/.hermes/plugins/session-platform
-cd ~/.hermes/plugins/session-platform/bridge
-npm install
+git clone https://github.com/BonesGit/hermes-session-platform.git ~/.hermes/plugins/session-platform
+cd ~/.hermes/plugins/session-platform
+npm install          # installs bridge/ deps via root postinstall (or: cd bridge && npm install)
 
-# User plugins are opt-in:
 hermes plugins enable session-platform
 ```
 
@@ -33,6 +43,19 @@ hermes plugins enable session-platform
 ```
 
 Entry point group: `hermes_agent.plugins` → `session-platform = adapter:register`.
+
+### Confirm you’re on the plugin (not old in-tree code)
+
+After `hermes gateway restart`:
+
+```bash
+rg "spawning bridge|Session plugin" ~/.hermes/logs/gateway.log | tail -5
+```
+
+Expect:
+- Logger: `hermes_plugins.session_platform.adapter`
+- Bridge path under this plugin’s `bridge/session-bridge.mjs`
+- A line like: `Session plugin v0.1.1 … bridge=…/bridge/session-bridge.mjs`
 
 ## Setup
 
@@ -87,7 +110,22 @@ The agent is instructed (via `platform_hint`) to use **plain text only** — no 
 deliver=session
 ```
 
-Requires the gateway (and thus the bridge) to be running. `standalone_sender_fn` posts to `http://127.0.0.1:<bridge_port>/send`.
+Uses `SESSION_HOME_CHANNEL` (via `cron_deliver_env_var`) and the plugin’s `standalone_sender_fn`, which POSTs to `http://127.0.0.1:<bridge_port>/send`.
+
+**Requirement:** the Hermes **gateway must be running** so the Node bridge is up on `SESSION_BRIDGE_PORT` (default `8095`). Cron in a separate process does not spawn its own bridge.
+
+Example one-shot test (gateway up, home channel set):
+
+```bash
+hermes cron add --name "session-ping" --schedule "1m" --repeat 1 \
+  --deliver session \
+  --prompt "Reply with exactly: session cron ok"
+```
+
+If the bridge is down you get a send error (connection refused to localhost), not silent success.
+
+**Port conflicts:** if something else already listens on the bridge port, connect fails with a clear log:
+`Session: port 8095 already in use …` — free the port or set `SESSION_BRIDGE_PORT`.
 
 ## Architecture
 
@@ -105,7 +143,8 @@ Bridge API (local only): `/health`, `/events` (SSE), `/send`, `/send-typing`, at
 
 ```bash
 cd hermes-session-platform
-pytest -q
+npm install          # bridge deps
+pytest -q            # needs Hermes on PYTHONPATH or installed
 ```
 
 Tests are plugin-local and do not require `Platform.SESSION` in Hermes core.
@@ -123,15 +162,18 @@ Tests are plugin-local and do not require `Platform.SESSION` in Hermes core.
 |---------|--------|
 | Plugin not listed | `hermes plugins enable session-platform` |
 | Bridge missing | `ls ~/.hermes/plugins/session-platform/bridge/session-bridge.mjs` |
+| `npm install` at repo root | Supported — runs `postinstall` → `bridge/` |
 | npm install fails | Node ≥ 24.12; see session-desktop-library CONTRIBUTING |
-| Gateway won’t start | `~/.hermes/logs/session-bridge.log`; port conflict on 8095 |
-| Duplicate account lock | Another profile/gateway already holds the bot ID lock |
+| Port already in use | `ss -ltnp \| rg 8095` or change `SESSION_BRIDGE_PORT` |
+| Gateway won’t start | `~/.hermes/logs/session-bridge.log`; look for `Session plugin v…` in gateway.log |
+| Still on old core adapter? | Logger must be `hermes_plugins.session_platform.adapter`, not `gateway.platforms.session` |
 
 ## License
 
-MIT (plugin). `@bonesgit/session-desktop-library` has its own license — see that package.
+MIT — see [LICENSE](LICENSE).  
+`@bonesgit/session-desktop-library` has its own license — see that package.
 
 ## Credits
 
-- Original in-tree adapter/bridge work that informed this plugin
+- Original Session gateway work that informed this plugin ([PR #6948](https://github.com/NousResearch/hermes-agent/pull/6948))
 - Hermes platform-plugin registry (`gateway/platform_registry.py`, IRC/WhatsApp plugin patterns)

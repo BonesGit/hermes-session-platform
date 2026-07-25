@@ -1,0 +1,11 @@
+{
+  "name": "hermes-session-platform",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Root helper — Node deps live in bridge/. Run npm install here or in bridge/.",
+  "scripts": {
+    "postinstall": "npm install --prefix bridge",
+    "install:bridge": "npm install --prefix bridge",
+    "audit:bridge": "npm audit --prefix bridge"
+  }
+}
