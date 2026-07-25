@@ -173,6 +173,8 @@ Tests are plugin-local and do not require `Platform.SESSION` in Hermes core.
 MIT — see [LICENSE](LICENSE).  
 `@bonesgit/session-desktop-library` has its own license — see that package.
 
+See also [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Credits
 
 - Original Session gateway work that informed this plugin ([PR #6948](https://github.com/NousResearch/hermes-agent/pull/6948))
