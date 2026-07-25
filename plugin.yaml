@@ -1,0 +1,52 @@
+name: session-platform
+label: Session
+kind: platform
+version: 0.1.0
+description: >
+  Session (getsession.org) gateway adapter for Hermes Agent.
+  Spawns a local Node.js bridge using @bonesgit/session-desktop-library
+  and relays DMs/groups over HTTP/SSE.
+author: BonesGit / community
+requires_env:
+  - name: SESSION_BOT_ID
+    description: "Session bot public ID (set by hermes gateway setup)"
+    prompt: "Session bot ID"
+    url: "https://getsession.org"
+    password: false
+optional_env:
+  - name: SESSION_MNEMONIC
+    description: "13-word Session mnemonic (backup; optional at runtime)"
+    prompt: "Session mnemonic"
+    password: true
+  - name: SESSION_ALLOWED_USERS
+    description: "Comma-separated Session IDs allowed to DM the bot"
+    prompt: "Allowed Session IDs"
+    password: false
+  - name: SESSION_ALLOW_ALL_USERS
+    description: "Allow any Session user (dev only)"
+    prompt: "Allow all users?"
+    password: false
+  - name: SESSION_GROUP_ALLOWED_USERS
+    description: "Comma-separated Session IDs allowed in groups (adapter-enforced)"
+    prompt: "Group allowed users"
+    password: false
+  - name: SESSION_GROUP_ALLOWED_CHATS
+    description: "Comma-separated group IDs (03...) the bot may answer in"
+    prompt: "Group allowed chats"
+    password: false
+  - name: SESSION_HOME_CHANNEL
+    description: "Default Session ID for cron / notification delivery"
+    prompt: "Home Session ID"
+    password: false
+  - name: SESSION_BOT_NAME
+    description: "Display name in Session (default Hermes)"
+    prompt: "Bot display name"
+    password: false
+  - name: SESSION_DATA_PATH
+    description: "Directory for Session account data (absolute path)"
+    prompt: "Session data path"
+    password: false
+  - name: SESSION_BRIDGE_PORT
+    description: "Local HTTP port for the Node bridge (default 8095)"
+    prompt: "Bridge port"
+    password: false
