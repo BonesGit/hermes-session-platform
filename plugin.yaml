@@ -1,7 +1,7 @@
 name: session-platform
 label: Session
 kind: platform
-version: 0.1.1
+version: 0.1.2
 description: >
   Session (getsession.org) gateway adapter for Hermes Agent.
   Spawns a local Node.js bridge using @bonesgit/session-desktop-library
@@ -14,6 +14,10 @@ requires_env:
     url: "https://getsession.org"
     password: false
 optional_env:
+  - name: SESSION_NODE
+    description: "Absolute path to Node >= 24.12 (default: NVM v24.12.0)"
+    prompt: "Path to node binary"
+    password: false
   - name: SESSION_MNEMONIC
     description: "13-word Session mnemonic (backup; optional at runtime)"
     prompt: "Session mnemonic"

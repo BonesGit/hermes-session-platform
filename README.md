@@ -20,7 +20,10 @@ git clone https://github.com/BonesGit/hermes-session-platform.git ~/.hermes/plug
 ## Prerequisites
 
 - Hermes Agent with the platform plugin registry (current `main`)
-- Node.js **≥ 24.12.0** and npm
+- Node.js **≥ 24.12.0** and npm — the adapter prefers the exact NVM install
+  **`v24.12.0`** (`~/.config/nvm/versions/node/v24.12.0/...`, or `$NVM_DIR` /
+  `~/.nvm`). Override with `SESSION_NODE=/absolute/path/to/node` if needed.
+  Hermes-managed Node 22 under `~/.hermes/node` is intentionally skipped.
 - A Session account (created by setup, or restored from a 13-word mnemonic)
 
 ## Install

@@ -79,10 +79,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Plugin identity / paths
 # ---------------------------------------------------------------------------
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 _PLUGIN_ROOT = Path(__file__).resolve().parent
 _DEFAULT_BRIDGE_DIR = _PLUGIN_ROOT / "bridge"
 _DEFAULT_BRIDGE_SCRIPT = _DEFAULT_BRIDGE_DIR / "session-bridge.mjs"
+
+# session-desktop-library floor. Prefer this exact NVM install so Hermes's
+# managed Node 22 under $HERMES_HOME/node (first on the gateway unit PATH)
+# cannot shadow a working Session runtime.
+SESSION_MIN_NODE = (24, 12, 0)
+SESSION_PREFERRED_NVM_VERSION = "24.12.0"
 
 
 def resolve_bridge_script() -> Path:
@@ -106,6 +112,138 @@ def bridge_port_is_listening(port: int, host: str = "127.0.0.1", timeout: float 
         return False
 
 
+def _parse_node_version(version: str) -> Optional[tuple]:
+    """Parse ``v24.12.0`` / ``24.12.0`` into a comparable int tuple."""
+    raw = (version or "").strip().lstrip("v")
+    if not raw:
+        return None
+    parts: list[int] = []
+    for piece in raw.split(".")[:3]:
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        if not digits:
+            return None
+        parts.append(int(digits))
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)  # type: ignore[return-value]
+
+
+def probe_node_version(node_path: str) -> Optional[str]:
+    """Return the version string (no leading ``v``) for *node_path*, or None."""
+    try:
+        result = subprocess.run(
+            [node_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        ver = result.stdout.strip().lstrip("v")
+        return ver or None
+    except Exception:
+        return None
+
+
+def node_meets_minimum(version: str, minimum: tuple = SESSION_MIN_NODE) -> bool:
+    parsed = _parse_node_version(version)
+    if parsed is None:
+        return False
+    return parsed >= minimum
+
+
+def _nvm_preferred_node_paths() -> list[str]:
+    """Candidate absolute paths for the pinned NVM Node install."""
+    home = os.path.expanduser("~")
+    ver = SESSION_PREFERRED_NVM_VERSION
+    nvm_roots = []
+    env_nvm = os.environ.get("NVM_DIR")
+    if env_nvm:
+        nvm_roots.append(env_nvm)
+    nvm_roots.extend(
+        [
+            os.path.join(home, ".config", "nvm"),
+            os.path.join(home, ".nvm"),
+        ]
+    )
+    # Preserve order, drop dupes.
+    seen = set()
+    out: list[str] = []
+    for root in nvm_roots:
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        out.append(
+            os.path.join(root, "versions", "node", f"v{ver}", "bin", "node")
+        )
+    return out
+
+
+def resolve_session_node() -> Optional[str]:
+    """Resolve the Node binary Session should use.
+
+    Order:
+      1. ``SESSION_NODE`` env (explicit override) when executable and >= 24.12.0
+      2. Pinned NVM install ``v24.12.0`` (``~/.config/nvm`` / ``$NVM_DIR`` / ``~/.nvm``)
+      3. First ``node`` on ``PATH`` that is >= 24.12.0 (skips Hermes-managed 22.x)
+
+    Returns an absolute path, or None if nothing suitable is found.
+    """
+    candidates: list[str] = []
+
+    override = (os.environ.get("SESSION_NODE") or "").strip()
+    if override:
+        candidates.append(os.path.expanduser(override))
+
+    candidates.extend(_nvm_preferred_node_paths())
+
+    # PATH scan last — skip already-queued paths.
+    path_seen = set(os.path.abspath(c) for c in candidates if c)
+    for directory in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not directory:
+            continue
+        cand = os.path.join(directory, "node.exe" if sys.platform == "win32" else "node")
+        abs_cand = os.path.abspath(cand)
+        if abs_cand in path_seen:
+            continue
+        path_seen.add(abs_cand)
+        candidates.append(cand)
+
+    for cand in candidates:
+        if not cand or not os.path.isfile(cand) or not os.access(cand, os.X_OK):
+            continue
+        version = probe_node_version(cand)
+        if version is None:
+            continue
+        if not node_meets_minimum(version):
+            logger.debug(
+                "Session: skipping Node %s at %s (need >= %s)",
+                version,
+                cand,
+                ".".join(str(x) for x in SESSION_MIN_NODE),
+            )
+            continue
+        resolved = os.path.abspath(cand)
+        logger.debug("Session: resolved Node %s at %s", version, resolved)
+        return resolved
+
+    return None
+
+
+def resolve_session_npm(node_path: Optional[str] = None) -> Optional[str]:
+    """Resolve npm alongside the Session Node binary when possible."""
+    import shutil
+
+    node = node_path or resolve_session_node()
+    npm_name = "npm.cmd" if sys.platform == "win32" else "npm"
+    if node:
+        sibling = os.path.join(os.path.dirname(node), npm_name)
+        if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+            return os.path.abspath(sibling)
+    found = shutil.which(npm_name)
+    return os.path.abspath(found) if found else None
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -126,37 +264,24 @@ def check_session_requirements() -> bool:
 
     Checks:
     - SESSION_BOT_ID env var is set (written by setup; mnemonic is optional)
-    - node >= 24.12.0 is available in PATH
+    - a Node >= 24.12.0 binary is resolvable (pinned NVM 24.12 preferred;
+      ignores Hermes-managed Node 22 when a newer Node exists)
     - The bridge script exists on disk
     """
-    import shutil
-
     bot_id = os.getenv("SESSION_BOT_ID")
     if not bot_id:
         logger.debug("Session: SESSION_BOT_ID not set")
         return False
 
-    node = shutil.which("node")
+    node = resolve_session_node()
     if not node:
-        logger.warning("Session: Node.js not found in PATH")
-        return False
-
-    try:
-        result = subprocess.run(
-            [node, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        logger.warning(
+            "Session: no suitable Node.js found (need >= %s; "
+            "set SESSION_NODE or install NVM v%s)",
+            ".".join(str(x) for x in SESSION_MIN_NODE),
+            SESSION_PREFERRED_NVM_VERSION,
         )
-        version = result.stdout.strip().lstrip("v")
-        major = int(version.split(".")[0])
-        if major < 24:
-            logger.warning(
-                "Session: Node.js %s too old, need >= 24.12.0", version
-            )
-            return False
-    except Exception as e:
-        logger.debug("Session: could not verify Node.js version: %s", e)
+        return False
 
     bridge_script = resolve_bridge_script()
     if not bridge_script.exists():
@@ -188,26 +313,24 @@ def session_doctor_checks(check_ok, check_fail, check_warn, issues: list, should
         check_fail("Session SESSION_BOT_ID format invalid", "(expected 66-char hex starting with 05)")
         issues.append("Session SESSION_BOT_ID appears malformed — re-run: hermes setup")
 
-    # Node.js version >= 24.12.0 (required by session-desktop-library)
-    import shutil as _shutil
-    node = _shutil.which("node")
+    # Node.js >= 24.12.0 (prefer pinned NVM; skip Hermes-managed 22.x)
+    node = resolve_session_node()
     if node:
-        try:
-            ver_result = subprocess.run(
-                [node, "--version"], capture_output=True, text=True, timeout=5
-            )
-            ver_str = ver_result.stdout.strip().lstrip("v")
-            parts = [int(x) for x in ver_str.split(".")[:3]]
-            if parts >= [24, 12, 0]:
-                check_ok("Session Node.js version", f"(v{ver_str} >= 24.12.0)")
-            else:
-                check_fail("Session Node.js version too old", f"(v{ver_str} — Session requires >= 24.12.0)")
-                issues.append("Session upgrade Node.js to >= 24.12.0 for Session gateway")
-        except Exception:
-            check_warn("Session Node.js version check failed")
+        ver_str = probe_node_version(node) or "?"
+        check_ok(
+            "Session Node.js version",
+            f"(v{ver_str} at {node})",
+        )
     else:
-        check_fail("Session Node.js not found", "(required for Session gateway)")
-        issues.append("Session install Node.js >= 24.12.0 for Session gateway")
+        check_fail(
+            "Session Node.js not found",
+            f"(need >= {'.'.join(str(x) for x in SESSION_MIN_NODE)}; "
+            f"prefer NVM v{SESSION_PREFERRED_NVM_VERSION} or set SESSION_NODE)",
+        )
+        issues.append(
+            "Session install Node.js >= 24.12.0 (NVM v24.12.0) or set SESSION_NODE "
+            "for Session gateway"
+        )
 
     # Bridge script exists
     bridge_script = resolve_bridge_script()
@@ -220,9 +343,7 @@ def session_doctor_checks(check_ok, check_fail, check_warn, issues: list, should
     # Bridge deps installed
     if (bridge_script.parent / "node_modules").exists():
         # Check if any deps need updating
-        import shutil as _shutil
-        npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
-        npm = _shutil.which(npm_cmd)
+        npm = resolve_session_npm(node)
         if not npm:
             check_warn("npm not found", "(cannot check Session bridge dep updates)")
         else:
@@ -1189,6 +1310,13 @@ class SessionAdapter(BasePlatformAdapter):
         deadlock when the OS pipe buffer fills up).
         """
         bridge_script = resolve_bridge_script()
+        node = resolve_session_node()
+        if not node:
+            raise RuntimeError(
+                "Session: no suitable Node.js binary "
+                f"(need >= {'.'.join(str(x) for x in SESSION_MIN_NODE)}; "
+                f"prefer NVM v{SESSION_PREFERRED_NVM_VERSION} or set SESSION_NODE)"
+            )
 
         # Session data goes in its own directory, but logs go to central logs/
         data_path = Path(
@@ -1206,25 +1334,33 @@ class SessionAdapter(BasePlatformAdapter):
         bridge_log_fh = open(self._bridge_log, "a")
         self._bridge_log_fh = bridge_log_fh
 
+        # Prefer Session's Node bin first so any child `node`/`npm` lookups
+        # match the resolved runtime (Hermes gateway PATH puts Node 22 first).
+        node_bin_dir = os.path.dirname(node)
+        env_path = os.environ.get("PATH", "")
         env = {
             **os.environ,
+            "PATH": node_bin_dir + (os.pathsep + env_path if env_path else ""),
             "SESSION_DATA_PATH": str(data_path),
             "SESSION_BRIDGE_PORT": str(self.bridge_port),
             "SESSION_BOT_NAME": self.bot_name,
             "SESSION_LOG_LEVEL": self.config.extra.get("log_level", "warn"),
         }
 
+        node_ver = probe_node_version(node) or "?"
         logger.info(
-            "Session plugin v%s: spawning bridge node %s (port %d, log %s)",
+            "Session plugin v%s: spawning bridge %s (node=%s v%s, port %d, log %s)",
             PLUGIN_VERSION,
             bridge_script,
+            node,
+            node_ver,
             self.bridge_port,
             self._bridge_log,
         )
 
         if sys.platform == "win32":
             process = subprocess.Popen(
-                ["node", "--no-deprecation", str(bridge_script)],
+                [node, "--no-deprecation", str(bridge_script)],
                 env=env,
                 stdout=bridge_log_fh,
                 stderr=bridge_log_fh,
@@ -1233,7 +1369,7 @@ class SessionAdapter(BasePlatformAdapter):
             )
         else:
             process = subprocess.Popen(
-                ["node", "--no-deprecation", str(bridge_script)],
+                [node, "--no-deprecation", str(bridge_script)],
                 env=env,
                 stdout=bridge_log_fh,
                 stderr=bridge_log_fh,
@@ -1409,10 +1545,14 @@ def interactive_setup() -> None:
         if not prompt_yes_no("Reconfigure Session?", False):
             return
 
-    node = shutil.which("node")
+    node = resolve_session_node()
     if not node:
-        print_error("Node.js not found. Install Node.js >= 24.12.0 first.")
+        print_error(
+            f"Node.js >= {'.'.join(str(x) for x in SESSION_MIN_NODE)} not found. "
+            f"Install NVM v{SESSION_PREFERRED_NVM_VERSION} or set SESSION_NODE."
+        )
         return
+    print_info(f"Using Node {probe_node_version(node) or '?'} at {node}")
 
     bridge_dir = resolve_bridge_dir()
     bridge_script = resolve_bridge_script()
@@ -1424,8 +1564,13 @@ def interactive_setup() -> None:
     print_info(
         "Installing Session bridge dependencies (may take a few minutes)..."
     )
-    npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
-    npm = shutil.which(npm_cmd) or "npm"
+    npm = resolve_session_npm(node) or ("npm.cmd" if sys.platform == "win32" else "npm")
+    # Ensure npm's node is the resolved one (Hermes PATH may prefer Node 22).
+    npm_env = {
+        **os.environ,
+        "PATH": os.path.dirname(node)
+        + (os.pathsep + os.environ.get("PATH", "") if os.environ.get("PATH") else ""),
+    }
     npm_result = subprocess.run(
         [npm, "install"],
         cwd=str(bridge_dir),
@@ -1433,6 +1578,7 @@ def interactive_setup() -> None:
         text=True,
         timeout=500,
         shell=sys.platform == "win32",
+        env=npm_env,
     )
     if npm_result.returncode != 0:
         err = (npm_result.stderr or npm_result.stdout or "").strip()
@@ -1451,7 +1597,16 @@ def interactive_setup() -> None:
     db_bot_id = None
     if Path(data_path).exists():
         try:
-            probe_env = {**os.environ, "SESSION_DATA_PATH": data_path}
+            probe_env = {
+                **os.environ,
+                "PATH": os.path.dirname(node)
+                + (
+                    os.pathsep + os.environ.get("PATH", "")
+                    if os.environ.get("PATH")
+                    else ""
+                ),
+                "SESSION_DATA_PATH": data_path,
+            }
             probe_result = subprocess.run(
                 [node, "--no-deprecation", str(bridge_script), "--check"],
                 env=probe_env,
@@ -1528,6 +1683,8 @@ def interactive_setup() -> None:
 
     env = {
         **os.environ,
+        "PATH": os.path.dirname(node)
+        + (os.pathsep + os.environ.get("PATH", "") if os.environ.get("PATH") else ""),
         "SESSION_DATA_PATH": data_path,
         "SESSION_BOT_NAME": bot_name,
     }

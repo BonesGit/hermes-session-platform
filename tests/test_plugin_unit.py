@@ -138,6 +138,89 @@ class TestRequirements:
         assert session_adapter.check_requirements() is False
 
 
+class TestNodeResolution:
+    def test_prefers_session_node_override(self, monkeypatch, tmp_path):
+        fake = tmp_path / "node"
+        fake.write_text("#!/bin/sh\necho v24.12.0\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv("SESSION_NODE", str(fake))
+        monkeypatch.setattr(
+            session_adapter,
+            "probe_node_version",
+            lambda p: "24.12.0" if p == str(fake.resolve()) or p == str(fake) else None,
+        )
+        # Avoid real NVM / PATH noise
+        monkeypatch.setattr(session_adapter, "_nvm_preferred_node_paths", lambda: [])
+        monkeypatch.setenv("PATH", "")
+        resolved = session_adapter.resolve_session_node()
+        assert resolved is not None
+        assert resolved.endswith("node")
+        assert str(tmp_path) in resolved
+
+    def test_skips_node_22(self, monkeypatch, tmp_path):
+        old = tmp_path / "old" / "node"
+        old.parent.mkdir()
+        old.write_text("#!/bin/sh\necho v22.23.2\n")
+        old.chmod(0o755)
+        new = tmp_path / "new" / "node"
+        new.parent.mkdir()
+        new.write_text("#!/bin/sh\necho v24.12.0\n")
+        new.chmod(0o755)
+
+        def probe(p):
+            if str(old) in p or p == str(old.resolve()):
+                return "22.23.2"
+            if str(new) in p or p == str(new.resolve()):
+                return "24.12.0"
+            return None
+
+        monkeypatch.delenv("SESSION_NODE", raising=False)
+        monkeypatch.setattr(session_adapter, "probe_node_version", probe)
+        monkeypatch.setattr(session_adapter, "_nvm_preferred_node_paths", lambda: [])
+        monkeypatch.setenv("PATH", f"{old.parent}:{new.parent}")
+        resolved = session_adapter.resolve_session_node()
+        assert resolved is not None
+        assert str(new.parent) in resolved
+
+    def test_prefers_pinned_nvm_path(self, monkeypatch, tmp_path):
+        nvm_node = tmp_path / "versions" / "node" / "v24.12.0" / "bin" / "node"
+        nvm_node.parent.mkdir(parents=True)
+        nvm_node.write_text("#!/bin/sh\necho v24.12.0\n")
+        nvm_node.chmod(0o755)
+
+        hermes22 = tmp_path / "hermes22" / "node"
+        hermes22.parent.mkdir()
+        hermes22.write_text("#!/bin/sh\necho v22.23.2\n")
+        hermes22.chmod(0o755)
+
+        def probe(p):
+            if "v24.12.0" in p:
+                return "24.12.0"
+            if "hermes22" in p:
+                return "22.23.2"
+            return None
+
+        monkeypatch.delenv("SESSION_NODE", raising=False)
+        monkeypatch.setattr(session_adapter, "probe_node_version", probe)
+        monkeypatch.setattr(
+            session_adapter,
+            "_nvm_preferred_node_paths",
+            lambda: [str(nvm_node)],
+        )
+        # Hermes 22 first on PATH — must still pick NVM 24.12
+        monkeypatch.setenv("PATH", str(hermes22.parent))
+        resolved = session_adapter.resolve_session_node()
+        assert resolved is not None
+        assert "v24.12.0" in resolved
+
+    def test_node_meets_minimum(self):
+        assert session_adapter.node_meets_minimum("24.12.0")
+        assert session_adapter.node_meets_minimum("24.15.0")
+        assert session_adapter.node_meets_minimum("26.4.0")
+        assert not session_adapter.node_meets_minimum("22.23.2")
+        assert not session_adapter.node_meets_minimum("24.11.9")
+
+
 class TestRegister:
     def test_register_calls_ctx(self):
         ctx = MagicMock()
